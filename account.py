@@ -1,6 +1,7 @@
 from decimal import Decimal
 from datetime import datetime, timedelta
 from transaction import Transaction
+from exceptions import OverdrawError, TransactionSequenceError, TransactionLimitError
 
 class Account:
     """
@@ -32,13 +33,18 @@ class Account:
         Returns:
             bool: True if the transaction was successfully added, False otherwise.
         """
+        # Ensure transactions are in chronological order
+        if self.transactions and transaction_date < max(t.date for t in self.transactions):
+            latest_date = max(t.date for t in self.transactions)
+            raise TransactionSequenceError(latest_date)
+
         if not bypass_limits:
             # For SavingsAccount, check transaction limits
             if isinstance(self, Savings) and not self.can_add_transaction(amount, transaction_date):
                 return False
             # Check for overdraft
             if self.balance + Decimal(amount) < Decimal('0.00'):
-                return False
+                raise OverdrawError("This transaction could not be completed due to an insufficient account balance.")
         # Add the transaction
         self.transactions.append(Transaction(Decimal(amount), transaction_date, is_interest=is_interest))
         self.balance += Decimal(amount)
@@ -55,13 +61,19 @@ class Account:
         next_month = last_date.replace(day=28) + timedelta(days=4)
         return next_month - timedelta(days=next_month.day)
         
-    #def get_details(self):
-        #"""
-        #Retrieves the details of the account.
-        #Returns:
-        #tuple: A tuple containing the account number, balance, and a list of transactions.
-        #"""
-        #return self.account_number, self.balance, self.transactions
+    def _can_apply_interest(self):
+        non_interest_transactions = [t for t in self.transactions if not t.is_interest]
+        if non_interest_transactions:
+            last_user_transaction_date = max(t.date for t in non_interest_transactions)
+
+            interest_transactions = [t for t in self.transactions if t.is_interest]
+            if interest_transactions:
+                last_interest_application = max(t.date for t in interest_transactions)
+
+                # Check if the last transaction was interest and it was applied in the last month of the latest transaction
+                if last_user_transaction_date.month == last_interest_application.month and last_user_transaction_date.year == last_interest_application.year:
+                    return False
+        return True
 
 class Savings(Account):
     """
@@ -79,19 +91,25 @@ class Savings(Account):
             bool: True if the transaction can be added, False otherwise.
         """
         # Convert input date to datetime.date for comparison
-        transaction_date = datetime.strptime(transaction_date, "%Y-%m-%d").date()
+        #transaction_date = datetime.strptime(transaction_date, "%Y-%m-%d").date()
         # Count transactions on the same day and in the same month
         same_day_transactions = sum(1 for t in self.transactions if t.date == transaction_date and not t.is_interest)
         same_month_transactions = sum(1 for t in self.transactions if t.date.month == transaction_date.month and t.date.year == transaction_date.year and not t.is_interest)
-        # Check transaction limits
-        if same_day_transactions >= 2 or same_month_transactions >= 5:
-            return False
+        
+        if same_day_transactions >= 2:
+            raise TransactionLimitError('daily')
+        if same_month_transactions >= 5:
+            raise TransactionLimitError('monthly')
         return True
 
     def apply_interest_and_fees(self):
         """
         Applies interest to the account balance and bypasses transaction limits.
         """
+        if not self._can_apply_interest():
+            last_interest_date = self.get_last_transaction_date()
+            raise TransactionSequenceError(last_interest_date, "Cannot apply interest and fees again in the month of {}.")
+        
         interest_rate = Decimal('0.0041')
         interest = self.balance * interest_rate
         self.add_transaction(interest, self.get_last_transaction_date(), bypass_limits=True, is_interest=True)
@@ -105,11 +123,16 @@ class Checking(Account):
         """
         Applies interest to the account balance and charges a fee if the balance is below the threshold.
         """
+        if not self._can_apply_interest():
+            last_interest_date = self.get_last_transaction_date()
+            raise TransactionSequenceError(last_interest_date, "Cannot apply interest and fees again in the month of {}.")
+
         interest_rate = Decimal('0.0008')
         interest = self.balance * interest_rate
-        self.add_transaction(interest, self.get_last_transaction_date(), bypass_limits=True)
+        self.add_transaction(interest, self.get_last_transaction_date(), bypass_limits=True, is_interest=True)
 
         fee_threshold = Decimal('100.00')
         fee = Decimal('5.44')
         if self.balance < fee_threshold:
-            self.add_transaction(-fee, self.get_last_transaction_date(), bypass_limits=True)
+            self.add_transaction(-fee, self.get_last_transaction_date(), bypass_limits=True, is_interest=True)
+
