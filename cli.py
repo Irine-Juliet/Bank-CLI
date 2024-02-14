@@ -1,8 +1,10 @@
 import sys
 import pickle
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 from bank import Bank
 from account import Account, Checking, Savings
+from datetime import datetime, date
+from exceptions import OverdrawError, TransactionSequenceError, TransactionLimitError
 
 class BankCLI:
     """
@@ -91,23 +93,59 @@ class BankCLI:
         """
         Adds a transaction to the currently selected account.
         """
-        amount = input("Amount?\n>")
-        transaction_date = input("Date? (YYYY-MM-DD)\n>")
-        self.current_account.add_transaction(amount, transaction_date)
+
+        try:
+            while True:
+                try:
+                    amount_str = input("Amount?\n>")
+                    amount = Decimal(amount_str) 
+                    break 
+                except InvalidOperation:
+                    print("Please try again with a valid dollar amount.")
+
+            while True:
+                transaction_date = input("Date? (YYYY-MM-DD)\n>")
+                try:
+                    valid_date = datetime.strptime(transaction_date, "%Y-%m-%d").date()
+                    break
+                except ValueError:
+                    print("Please try again with a valid date in the format YYYY-MM-DD.")
+
+            try:
+                self.current_account.add_transaction(amount, valid_date)
+            except OverdrawError as overdraw:
+                print(overdraw)
+            except TransactionLimitError as limit_error:
+                print(limit_error)
+            except TransactionSequenceError as sequence_error:
+                print(f"New transactions must be from {sequence_error.latest_date.strftime('%Y-%m-%d')} onward.")
+        except AttributeError:
+            print("This command requires that you first select an account.")
+
 
     def _list_transactions(self):
         """
         Lists all transactions for the currently selected account.
         """
-        transactions = self.bank.list_transactions(self.current_account.account_number)
-        for transaction in transactions:
-            print(f"{transaction.date}, ${transaction.amount:,.2f}")
+
+        try:
+            transactions = self.bank.list_transactions(self.current_account.account_number)
+            for transaction in transactions:
+                print(f"{transaction.date}, ${transaction.amount:,.2f}")
+        except AttributeError:
+             print("This command requires that you first select an account.")
+
 
     def _interest_and_fees(self):
         """
         Applies interest and fees to the currently selected account.
         """
-        self.current_account.apply_interest_and_fees()
+        try:
+            self.current_account.apply_interest_and_fees()
+        except AttributeError:
+             print("This command requires that you first select an account.")
+        except TransactionSequenceError as interest_error:
+            print(interest_error)
        
     def _save(self):
         """
