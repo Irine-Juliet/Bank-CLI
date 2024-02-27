@@ -1,9 +1,13 @@
+import logging
+from base import Base
 from decimal import Decimal
-from datetime import datetime, timedelta
+from datetime import timedelta
 from transaction import Transaction
+from sqlalchemy.orm import relationship, backref, mapped_column
+from sqlalchemy import Integer, String, ForeignKey, Numeric, func
 from exceptions import OverdrawError, TransactionSequenceError, TransactionLimitError
 
-class Account:
+class Account(Base):
     """
     A base class for different types of bank accounts.
     Attributes:
@@ -11,18 +15,27 @@ class Account:
         balance (Decimal): The current balance of the account.
         transactions (list): A list of transactions associated with the account.
     """
-    account_number_counter = 1
+    __tablename__ = 'accounts'
 
-    def __init__(self):
+    _account_number = mapped_column(Integer, primary_key=True, autoincrement=False)
+    _balance = mapped_column(Numeric(10, 2), default=Decimal('0.00'))
+    _account_type = mapped_column(String)
+    _transactions = relationship("Transaction", backref=backref("account"))
+    _bank_id = mapped_column(Integer, ForeignKey('bank._id'))
+
+    __mapper_args__ = {
+        'polymorphic_identity':'account',
+        'polymorphic_on':_account_type
+    }
+
+    def __init__(self, account_number, balance=Decimal('0.00')):
         """
         Initializes a new Account instance with a unique account number, zero balance, and an empty list of transactions.
         """
-        self.account_number = Account.account_number_counter
-        Account.account_number_counter += 1
-        self.balance = Decimal('0.00')
-        self.transactions = []
+        self._account_number = account_number
+        self._balance = balance
     
-    def add_transaction(self, amount, transaction_date, bypass_limits=False, is_interest=False):
+    def add_transaction(self, amount, session, transaction_date, bypass_limits=False, is_interest=False):
         """
         Adds a new transaction to the account.
         Parameters:
@@ -33,55 +46,72 @@ class Account:
         Returns:
             bool: True if the transaction was successfully added, False otherwise.
         """
-        # Ensure transactions are in chronological order
-        if self.transactions and transaction_date < max(t.date for t in self.transactions):
-            latest_date = max(t.date for t in self.transactions)
-            raise TransactionSequenceError(latest_date)
-
+        latest_transaction = session.query(Transaction).filter(Transaction._account_number == self._account_number).order_by(Transaction._date.desc()).first()
+        if latest_transaction and transaction_date < latest_transaction._date:
+            raise TransactionSequenceError(latest_transaction._date)
+        
         if not bypass_limits:
             # For SavingsAccount, check transaction limits
-            if isinstance(self, Savings) and not self.can_add_transaction(amount, transaction_date):
+            if isinstance(self, Savings) and not self._can_add_transaction(amount, session, transaction_date):
                 return False
             # Check for overdraft
-            if self.balance + Decimal(amount) < Decimal('0.00'):
+            if self._balance + Decimal(amount) < Decimal('0.00'):
                 raise OverdrawError("This transaction could not be completed due to an insufficient account balance.")
+            
         # Add the transaction
-        self.transactions.append(Transaction(Decimal(amount), transaction_date, is_interest=is_interest))
-        self.balance += Decimal(amount)
+        new_transaction = Transaction(amount=Decimal(amount), transaction_date=transaction_date, _account_number=self._account_number, is_interest=is_interest)
+        session.add(new_transaction)
+        # Update balance
+        self._balance += amount
         return True
 
-    def get_last_transaction_date(self):
+    def _get_last_transaction_date(self, session):
         """
         Determines the last transaction date of the month based on existing transactions.
         Returns:
             datetime.date: The last day of the month for the latest transaction.
         """
-        last_date = max(t.date for t in self.transactions)
-        # Find the last day of the month
-        next_month = last_date.replace(day=28) + timedelta(days=4)
+        latest_transaction_date = session.query(func.max(Transaction._date)).filter(Transaction._account_number == self._account_number).scalar()
+        if latest_transaction_date is None:
+            # No transactions found, return None 
+            return None
+        next_month = latest_transaction_date.replace(day=28) + timedelta(days=4)
         return next_month - timedelta(days=next_month.day)
         
-    def _can_apply_interest(self):
-        non_interest_transactions = [t for t in self.transactions if not t.is_interest]
-        if non_interest_transactions:
-            last_user_transaction_date = max(t.date for t in non_interest_transactions)
+    def _can_apply_interest(self,session):
+       # Query the date of the latest non-interest transaction
+       last_user_transaction_date = session.query(func.max(Transaction._date))\
+            .filter(Transaction._account_number == self._account_number, Transaction._is_interest == False)\
+            .scalar()
 
-            interest_transactions = [t for t in self.transactions if t.is_interest]
-            if interest_transactions:
-                last_interest_application = max(t.date for t in interest_transactions)
-
-                # Check if the last transaction was interest and it was applied in the last month of the latest transaction
-                if last_user_transaction_date.month == last_interest_application.month and last_user_transaction_date.year == last_interest_application.year:
-                    return False
+        # If there are no non-interest transactions, interest can be applied
+       if not last_user_transaction_date:
         return True
+       # Query the date of the latest interest transaction
+       last_interest_application_date = session.query(func.max(Transaction._date))\
+            .filter(Transaction._account_number == self._account_number, Transaction._is_interest == True)\
+            .scalar()
+
+        # If there are no interest transactions yet, interest can be applied
+       if not last_interest_application_date:
+           return True
+       # Check if the last non-interest transaction and the last interest application are in the same month and year
+       if (last_user_transaction_date.month == last_interest_application_date.month and 
+           last_user_transaction_date.year == last_interest_application_date.year):
+           return False  # Interest was already applied in the same month of the last transaction
+
+       return True
 
 class Savings(Account):
     """
     Represents a savings account, inheriting from Account.
     Savings accounts have transaction limits.
     """
+    __mapper_args__ = {
+        'polymorphic_identity':'savings',
+    }
 
-    def can_add_transaction(self, amount, transaction_date):
+    def _can_add_transaction(self, amount, session, transaction_date):
         """
         Checks if a new transaction can be added to the account without exceeding transaction limits.
         Parameters:
@@ -90,49 +120,57 @@ class Savings(Account):
         Returns:
             bool: True if the transaction can be added, False otherwise.
         """
-        # Convert input date to datetime.date for comparison
-        #transaction_date = datetime.strptime(transaction_date, "%Y-%m-%d").date()
-        # Count transactions on the same day and in the same month
-        same_day_transactions = sum(1 for t in self.transactions if t.date == transaction_date and not t.is_interest)
-        same_month_transactions = sum(1 for t in self.transactions if t.date.month == transaction_date.month and t.date.year == transaction_date.year and not t.is_interest)
-        
+        same_day_transactions = session.query(func.count(Transaction._id)).filter(Transaction._account_number == self._account_number,
+                                                                          func.date(Transaction._date) == transaction_date,
+                                                                          Transaction._is_interest == False ).scalar()
+        same_month_transactions = session.query(func.count(Transaction._id)).filter(Transaction._account_number == self._account_number,
+                                                                            func.extract('month', Transaction._date) == transaction_date.month,
+                                                                            func.extract('year', Transaction._date) == transaction_date.year,
+                                                                            Transaction._is_interest == False).scalar()
         if same_day_transactions >= 2:
             raise TransactionLimitError('daily')
         if same_month_transactions >= 5:
             raise TransactionLimitError('monthly')
         return True
 
-    def apply_interest_and_fees(self):
+    def apply_interest_and_fees(self, session):
         """
         Applies interest to the account balance and bypasses transaction limits.
         """
-        if not self._can_apply_interest():
-            last_interest_date = self.get_last_transaction_date()
+        if not self._can_apply_interest(session):
+            last_interest_date = self._get_last_transaction_date(session)
             raise TransactionSequenceError(last_interest_date, "Cannot apply interest and fees again in the month of {}.")
         
         interest_rate = Decimal('0.0041')
-        interest = self.balance * interest_rate
-        self.add_transaction(interest, self.get_last_transaction_date(), bypass_limits=True, is_interest=True)
+        interest = self._balance * interest_rate
+        self.add_transaction(interest, session,  self._get_last_transaction_date(session), bypass_limits=True, is_interest=True)
+        logging.debug("Triggered interest and fees")
 
 class Checking(Account):
     """
     Represents a checking account, inheriting from Account.
     Checking accounts may incur a fee if the balance is below a certain threshold.
     """
-    def apply_interest_and_fees(self):
+    __mapper_args__ = {
+        'polymorphic_identity':'checking',
+    }
+
+    def apply_interest_and_fees(self, session):
         """
         Applies interest to the account balance and charges a fee if the balance is below the threshold.
         """
-        if not self._can_apply_interest():
-            last_interest_date = self.get_last_transaction_date()
+        
+        if not self._can_apply_interest(session):
+            last_interest_date = self._get_last_transaction_date(session)
             raise TransactionSequenceError(last_interest_date, "Cannot apply interest and fees again in the month of {}.")
 
         interest_rate = Decimal('0.0008')
-        interest = self.balance * interest_rate
-        self.add_transaction(interest, self.get_last_transaction_date(), bypass_limits=True, is_interest=True)
+        interest = self._balance * interest_rate
+        self.add_transaction(interest, session, self._get_last_transaction_date(session), bypass_limits=True, is_interest=True)
+        logging.debug("Triggered interest and fees")
 
         fee_threshold = Decimal('100.00')
         fee = Decimal('5.44')
-        if self.balance < fee_threshold:
-            self.add_transaction(-fee, self.get_last_transaction_date(), bypass_limits=True, is_interest=True)
+        if self._balance < fee_threshold:
+            self.add_transaction(-fee, session, self._get_last_transaction_date(session), bypass_limits=True, is_interest=True)
 
