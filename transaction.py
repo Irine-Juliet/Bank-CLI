@@ -1,7 +1,10 @@
-from datetime import datetime, date
+from base import Base
 from decimal import Decimal
+from datetime import datetime, date
+from sqlalchemy.orm import  mapped_column
+from sqlalchemy import Integer, Numeric, Date, Boolean, ForeignKey
 
-class Transaction:
+class Transaction(Base):
     """
     Represents a financial transaction in a bank account.
     Attributes:
@@ -9,7 +12,16 @@ class Transaction:
         date (datetime.date): The date when the transaction occurred.
         is_interest (bool): Flag indicating whether the transaction is an interest payment.
     """
-    def __init__(self, amount, transaction_date, is_interest=False):
+
+    __tablename__ = 'transactions'
+
+    _id = mapped_column(Integer, primary_key=True, autoincrement=True)
+    _amount = mapped_column(Numeric(10, 2), nullable=False)
+    _date = mapped_column(Date, nullable=False)
+    _is_interest = mapped_column(Boolean, default=False, nullable=False)
+    _account_number = mapped_column(Integer, ForeignKey('accounts._account_number'))
+
+    def __init__(self, amount, transaction_date, _account_number, is_interest=False):
         """
         Initializes a new Transaction instance.
         Parameters:
@@ -17,11 +29,12 @@ class Transaction:
             transaction_date (str or datetime.date, optional): The date of the transaction.
             is_interest (bool, optional): Specifies if the transaction is an interest payment. Defaults to False.
         """
-        self.amount = Decimal(amount)
+        self._amount = Decimal(amount)
         if isinstance(transaction_date, str):
             # Parse string to datetime.date object
-            self.date = datetime.strptime(transaction_date, "%Y-%m-%d").date()
+            self._date= datetime.strptime(transaction_date, "%Y-%m-%d").date()
         elif isinstance(transaction_date, date):
             # If it's already a date, just use it 
-            self.date = transaction_date
-        self.is_interest = is_interest
+            self._date= transaction_date
+        self._is_interest = is_interest
+        self._account_number = _account_number 
