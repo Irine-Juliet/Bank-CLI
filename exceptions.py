@@ -1,3 +1,6 @@
+class NoAccountSelectedError(Exception):
+    """Exception raised when no account is selected."""
+    pass
 
 class OverdrawError(Exception):
     """Exception raised for attempts to overdraw an account."""
@@ -12,6 +15,7 @@ class TransactionSequenceError(Exception):
             message = message.format(latest_date.strftime("%B"))
         super().__init__(message)
         self.latest_date = latest_date
+        
 class TransactionLimitError(Exception):
     """Exception raised for exceeding transaction limits."""
     def __init__(self, limit_type):
